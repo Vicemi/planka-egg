@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/plankanban/planka/master/client/public/favicons/favicon-512x512.png" width="120" alt="Planka Logo" />
+<img src="https://blog.immensity.in/wp-content/uploads/2025/03/Planka_logo_feature.png" width="120" alt="Planka Logo" />
 
 # Planka Egg para Pterodactyl
 
