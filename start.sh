@@ -5,6 +5,8 @@
 # PostgreSQL embebido via binarios estáticos (instalados por el egg)
 # ===========================================================
 
+set -e
+
 cd /home/container || { echo "ERROR: No se pudo acceder a /home/container"; exit 1; }
 
 echo "=========================================="
@@ -28,14 +30,22 @@ fi
 export PATH="${PG_BIN_DIR}:$PATH"
 export LD_LIBRARY_PATH="${PG_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 
-# Verificar que los binarios clave existan y sean ejecutables
+# Verificar que los binarios clave existan
 for bin in initdb pg_ctl pg_isready psql createdb; do
     if ! command -v "$bin" &>/dev/null; then
         echo "ERROR FATAL: Binario '$bin' no encontrado en $PG_BIN_DIR"
-        echo "  Reinstala el servidor desde el panel de Pterodactyl."
         exit 1
     fi
 done
+
+# Probar ejecución real de pg_ctl (detecta faltantes de bibliotecas)
+if ! pg_ctl --version &>/dev/null; then
+    echo "ERROR FATAL: No se puede ejecutar pg_ctl. Faltan bibliotecas compartidas."
+    echo "  Asegúrate de que $PG_LIB_DIR contenga las .so necesarias."
+    echo "  Contenido de $PG_LIB_DIR:"
+    ls -la "$PG_LIB_DIR" || echo "  (directorio vacío o inexistente)"
+    exit 1
+fi
 
 echo "  PostgreSQL listo: $(pg_ctl --version)"
 
@@ -49,26 +59,19 @@ export PGUSER=postgres
 export PGHOST=127.0.0.1
 export PGPORT=5432
 
-# Inicializar el clúster si no existe
+mkdir -p "$PGDATA"
+chmod 700 "$PGDATA"
+
+# Inicializar clúster si no existe
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "  Inicializando clúster PostgreSQL en $PGDATA..."
-    mkdir -p "$PGDATA"
-    chmod 700 "$PGDATA"
-
     if ! initdb -D "$PGDATA" --username=postgres --auth=trust --locale=C --encoding=UTF8; then
-        echo "ERROR FATAL: initdb falló. Revisa los permisos de $PGDATA."
+        echo "ERROR FATAL: initdb falló."
         exit 1
     fi
     echo "  Clúster inicializado correctamente."
 else
     echo "  Clúster existente detectado en $PGDATA."
-fi
-
-# Verificar que postgresql.conf existe antes de editarlo
-if [ ! -f "$PGDATA/postgresql.conf" ]; then
-    echo "ERROR FATAL: postgresql.conf no encontrado. El clúster puede estar corrupto."
-    echo "  Borra el directorio $PGDATA y reinicia el servidor."
-    exit 1
 fi
 
 # Configurar pg_hba.conf
@@ -82,9 +85,9 @@ PGHBA
 sed -i "s|^#*listen_addresses.*|listen_addresses = '127.0.0.1'|" "$PGDATA/postgresql.conf"
 sed -i "s|^#*port = .*|port = 5432|" "$PGDATA/postgresql.conf"
 
-# Silenciar algunas advertencias molestas en contenedores
-grep -q "^unix_socket_directories" "$PGDATA/postgresql.conf" || \
+if ! grep -q "^unix_socket_directories" "$PGDATA/postgresql.conf"; then
     echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+fi
 
 # Iniciar PostgreSQL
 echo "  Iniciando PostgreSQL..."
@@ -97,7 +100,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Esperar a que esté listo (máx 60s)
+# Esperar a que esté listo
 PG_READY=0
 for i in $(seq 1 30); do
     if pg_isready -q -h 127.0.0.1 -p 5432 -U postgres; then
@@ -116,7 +119,7 @@ if [ "$PG_READY" -eq 0 ]; then
     exit 1
 fi
 
-# Crear rol interno para gestionar la BD sin escalar privilegios
+# Crear rol container
 psql -h 127.0.0.1 -p 5432 -U postgres \
     -c "CREATE ROLE container WITH SUPERUSER LOGIN PASSWORD 'container';" \
     > /dev/null 2>&1 || true
@@ -131,7 +134,6 @@ echo "[2/5] Configurando base de datos..."
 
 if [ -z "${DB_NAME}" ] || [ -z "${DB_USER}" ] || [ -z "${DB_PASSWORD}" ]; then
     echo "ERROR FATAL: Las variables DB_NAME, DB_USER y DB_PASSWORD son obligatorias."
-    echo "  Configúralas en el panel de Pterodactyl antes de encender el servidor."
     exit 1
 fi
 
@@ -144,7 +146,6 @@ if [ "$USER_EXISTS" != "1" ]; then
     echo "  Usuario '${DB_USER}' creado."
 fi
 
-# Actualizar contraseña siempre (por si cambió en el panel)
 psql -h 127.0.0.1 -p 5432 \
     -c "ALTER USER \"${DB_USER}\" WITH PASSWORD '${DB_PASSWORD}';" > /dev/null 2>&1
 
@@ -185,7 +186,6 @@ fi
 # -------------------------------------------------------
 echo "[4/5] Aplicando configuración del panel..."
 
-# Validar variables obligatorias
 if [ -z "${BASE_URL}" ]; then
     echo "  ADVERTENCIA: BASE_URL está vacío. Usando http://localhost:${SERVER_PORT}"
     BASE_URL="http://localhost:${SERVER_PORT}"
@@ -240,12 +240,22 @@ echo "=========================================="
 
 cd /home/container
 
-# Inicializar / migrar base de datos de Planka
+# Migrar base de datos
 if ! npm run db:init; then
     echo "ERROR FATAL: La migración de la base de datos falló."
-    echo "  Revisa que DATABASE_URL sea correcta y que el usuario tenga permisos."
     exit 1
 fi
 
+# Función para detener PostgreSQL al salir
+cleanup() {
+    echo ""
+    echo "Deteniendo PostgreSQL..."
+    pg_ctl -D "$PGDATA" stop -m fast || true
+    exit 0
+}
+trap cleanup SIGTERM SIGINT
+
 # Arrancar Planka
-exec npm start
+npm start &
+PLANKA_PID=$!
+wait $PLANKA_PID
