@@ -5,12 +5,29 @@
 # Imagen de runtime: ghcr.io/zastinian/esdock:nodejs_22
 # ===========================================================
 
-# En Pterodactyl el directorio del servidor es /home/container
 cd /home/container || { echo "ERROR: No se pudo acceder a /home/container"; exit 1; }
 
 echo "=========================================="
 echo "   Planka - Iniciando servidor"
 echo "=========================================="
+
+# -------------------------------------------------------
+# PASO 0: Instalar PostgreSQL si no está disponible
+# -------------------------------------------------------
+echo "[0/5] Verificando PostgreSQL..."
+if ! command -v initdb &>/dev/null || ! command -v pg_isready &>/dev/null; then
+    echo "  PostgreSQL no encontrado. Instalando (puede tardar ~30s)..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq postgresql postgresql-client
+    echo "  PostgreSQL instalado OK."
+else
+    echo "  PostgreSQL disponible."
+fi
+
+# Detectar versión y agregar binarios al PATH
+PG_VER=$(ls /usr/lib/postgresql/ 2>/dev/null | sort -V | tail -1)
+[ -n "$PG_VER" ] && export PATH="/usr/lib/postgresql/${PG_VER}/bin:$PATH"
 
 # -------------------------------------------------------
 # PASO 1: Configurar e iniciar PostgreSQL
@@ -25,16 +42,25 @@ export PGPORT=5432
 # Inicializar el clúster si no existe
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "  Inicializando clúster PostgreSQL en $PGDATA..."
-    initdb -D "$PGDATA" --username=postgres --pwfile=<(echo "postgres") > /dev/null 2>&1
-    # Configurar acceso local
-    echo "host all all 127.0.0.1/32 md5" >> "$PGDATA/pg_hba.conf"
-    echo "listen_addresses = 'localhost'" >> "$PGDATA/postgresql.conf"
+    mkdir -p "$PGDATA"
+    initdb -D "$PGDATA" --username=postgres --auth=trust --locale=C > /dev/null 2>&1
     echo "  Clúster inicializado."
 fi
 
+# Configurar pg_hba.conf
+cat > "$PGDATA/pg_hba.conf" << 'PGHBA'
+local   all             all                                     trust
+host    all             all             127.0.0.1/32            trust
+host    all             all             ::1/128                 trust
+PGHBA
+
+# Configurar postgresql.conf
+sed -i "s|^#*listen_addresses.*|listen_addresses = '127.0.0.1'|" "$PGDATA/postgresql.conf"
+sed -i "s|^#*port = .*|port = 5432|" "$PGDATA/postgresql.conf"
+
 # Iniciar PostgreSQL
 echo "  Iniciando PostgreSQL..."
-pg_ctl -D "$PGDATA" -l "$PGDATA/logfile" start > /dev/null 2>&1
+pg_ctl -D "$PGDATA" -l "$PGDATA/logfile" start -w -t 30 > /dev/null 2>&1 || true
 
 # Esperar a que esté listo (máx 60s)
 PG_READY=0
@@ -58,7 +84,6 @@ fi
 # Crear superusuario 'container' para gestionar DB sin sudo
 psql -h 127.0.0.1 -p 5432 -U postgres -c "CREATE ROLE container WITH SUPERUSER LOGIN PASSWORD 'container';" > /dev/null 2>&1 || true
 
-# Usar el usuario container para el resto de operaciones
 export PGUSER=container
 export PGPASSWORD=container
 
