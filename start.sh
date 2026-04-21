@@ -28,11 +28,11 @@ if [ ! -d "$PG_BIN_DIR" ]; then
     exit 1
 fi
 
-# Las libs copiadas van PRIMERO para que PG use las versiones con las que fue compilado
 export LD_LIBRARY_PATH="${PG_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 export PATH="${PG_BIN_DIR}:$PATH"
+export HOME=/home/container
+export USER=${USER:-container}
 
-# Verificar binarios
 for bin in initdb pg_ctl pg_isready psql createdb; do
     if [ ! -f "${PG_BIN_DIR}/${bin}" ]; then
         echo "ERROR FATAL: Binario faltante: ${PG_BIN_DIR}/${bin}"
@@ -40,13 +40,11 @@ for bin in initdb pg_ctl pg_isready psql createdb; do
     fi
 done
 
-# Probar ejecución
 if ! pg_ctl --version >/dev/null 2>&1; then
     echo "ERROR FATAL: No se puede ejecutar pg_ctl."
     echo "  LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
     echo "  Libs en $PG_LIB_DIR:"
     ls "$PG_LIB_DIR" 2>/dev/null || echo "  (vacio)"
-    echo "  ldd:"
     ldd "${PG_BIN_DIR}/postgres" 2>&1 || true
     exit 1
 fi
@@ -54,34 +52,58 @@ fi
 echo "  PostgreSQL: $(pg_ctl --version)"
 
 # -------------------------------------------------------
-# PASO 0.5: Registrar usuario actual en /etc/passwd
+# PASO 0.5: NSS Wrapper para que initdb pueda resolver
+# el UID del proceso actual.
 #
-# initdb necesita que el UID del proceso exista en
-# /etc/passwd. Pterodactyl corre contenedores con UIDs
-# dinamicos (ej: 999) que no están registrados por defecto.
+# Pterodactyl corre contenedores con UIDs dinámicos (ej: 999)
+# que no están en /etc/passwd del runtime, y /etc/passwd
+# es read-only. initdb llama a getpwuid() internamente y
+# falla si el UID no existe.
+#
+# Solución: libnss_wrapper — intercepta las llamadas NSS
+# y las redirige a un /etc/passwd temporal que creamos
+# nosotros. Es exactamente la técnica que usa la imagen
+# oficial postgres de Docker.
 # -------------------------------------------------------
 CURRENT_UID=$(id -u)
 CURRENT_GID=$(id -g)
 
 if ! getent passwd "$CURRENT_UID" > /dev/null 2>&1; then
-    echo "  UID $CURRENT_UID no registrado en /etc/passwd — creando entrada..."
-    # Intentar escribir en /etc/passwd (funciona si no es read-only)
-    if echo "container:x:${CURRENT_UID}:${CURRENT_GID}:container:/home/container:/bin/bash" >> /etc/passwd 2>/dev/null; then
-        echo "  Entrada creada correctamente."
+    echo "  UID $CURRENT_UID no en /etc/passwd — activando libnss_wrapper..."
+
+    NSS_WRAPPER_LIB=""
+    # Buscar libnss_wrapper copiado por el instalador
+    for candidate in \
+        "${PG_LIB_DIR}/libnss_wrapper.so" \
+        "${PG_LIB_DIR}/libnss_wrapper.so.0" \
+        "/usr/lib/x86_64-linux-gnu/libnss_wrapper.so" \
+        "/usr/lib/libnss_wrapper.so"; do
+        if [ -f "$candidate" ]; then
+            NSS_WRAPPER_LIB="$candidate"
+            break
+        fi
+    done
+
+    if [ -n "$NSS_WRAPPER_LIB" ]; then
+        PASSWD_FILE="/tmp/planka_passwd_$$"
+        GROUP_FILE="/tmp/planka_group_$$"
+
+        echo "container:x:${CURRENT_UID}:${CURRENT_GID}:container:/home/container:/bin/bash" > "$PASSWD_FILE"
+        echo "container:x:${CURRENT_GID}:" > "$GROUP_FILE"
+
+        export NSS_WRAPPER_PASSWD="$PASSWD_FILE"
+        export NSS_WRAPPER_GROUP="$GROUP_FILE"
+        export LD_PRELOAD="${NSS_WRAPPER_LIB}${LD_PRELOAD:+:$LD_PRELOAD}"
+
+        echo "  libnss_wrapper activo: $NSS_WRAPPER_LIB"
     else
-        echo "  ADVERTENCIA: No se pudo escribir en /etc/passwd."
-        echo "  Intentando via NSS override..."
-        # Alternativa: usar variable de entorno que algunos sistemas respetan
-        export USER=container
-        export LOGNAME=container
+        echo "  ADVERTENCIA: libnss_wrapper no encontrado."
+        echo "  Reinstala el servidor para que el instalador lo copie."
+        exit 1
     fi
 else
-    echo "  Usuario UID=$CURRENT_UID ya existe en /etc/passwd."
+    echo "  UID $CURRENT_UID ya registrado en /etc/passwd."
 fi
-
-# Asegurar que HOME y USER estén definidos (initdb los usa)
-export HOME=/home/container
-export USER=${USER:-container}
 
 # -------------------------------------------------------
 # PASO 1: Configurar e iniciar PostgreSQL
@@ -96,11 +118,9 @@ export PGPORT=5432
 mkdir -p "$PGDATA"
 chmod 700 "$PGDATA"
 
-# Inicializar cluster si no existe
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "  Inicializando cluster PostgreSQL en $PGDATA..."
 
-    # El share/ de PG (timezones, etc.) debe estar disponible
     PG_SHARE=""
     if [ -d "/home/container/pg_bin/share/16" ]; then
         PG_SHARE="/home/container/pg_bin/share/16"
@@ -121,14 +141,12 @@ else
     echo "  Cluster existente en $PGDATA."
 fi
 
-# pg_hba.conf
 cat > "$PGDATA/pg_hba.conf" << 'PGHBA'
 local   all             all                                     trust
 host    all             all             127.0.0.1/32            trust
 host    all             all             ::1/128                 trust
 PGHBA
 
-# postgresql.conf
 sed -i "s|^#*listen_addresses.*|listen_addresses = '127.0.0.1'|" "$PGDATA/postgresql.conf"
 sed -i "s|^#*port = .*|port = 5432|" "$PGDATA/postgresql.conf"
 
@@ -282,6 +300,8 @@ fi
 cleanup() {
     echo "Deteniendo PostgreSQL..."
     pg_ctl -D "$PGDATA" stop -m fast || true
+    # Limpiar archivos temporales de NSS
+    rm -f "$NSS_WRAPPER_PASSWD" "$NSS_WRAPPER_GROUP" 2>/dev/null || true
     exit 0
 }
 trap cleanup SIGTERM SIGINT
