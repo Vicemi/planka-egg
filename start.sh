@@ -6,8 +6,8 @@
 # postgres:16-bullseye durante la instalación
 # ===========================================================
 
-# NOTA: NO usar "set -e" aquí — necesitamos controlar
-# manualmente los códigos de retorno de pg_ctl y psql.
+# NOTA: NO usar "set -e" — necesitamos controlar manualmente
+# los códigos de retorno de pg_ctl, psql, etc.
 
 cd /home/container || { echo "ERROR: No se pudo acceder a /home/container"; exit 1; }
 
@@ -22,6 +22,7 @@ echo "[0/5] Configurando entorno de PostgreSQL..."
 
 PG_BIN_DIR="/home/container/pg_bin/bin"
 PG_LIB_DIR="/home/container/pg_bin/lib"
+PG_SHARE_BASE="/home/container/pg_bin/share"
 
 if [ ! -d "$PG_BIN_DIR" ]; then
     echo "ERROR FATAL: No se encontro el directorio de binarios: $PG_BIN_DIR"
@@ -53,18 +54,7 @@ fi
 echo "  PostgreSQL: $(pg_ctl --version)"
 
 # -------------------------------------------------------
-# PASO 0.5: NSS Wrapper para que initdb pueda resolver
-# el UID del proceso actual.
-#
-# Pterodactyl corre contenedores con UIDs dinámicos (ej: 999)
-# que no están en /etc/passwd del runtime, y /etc/passwd
-# es read-only. initdb llama a getpwuid() internamente y
-# falla si el UID no existe.
-#
-# Solución: libnss_wrapper — intercepta las llamadas NSS
-# y las redirige a un /etc/passwd temporal que creamos
-# nosotros. Es exactamente la técnica que usa la imagen
-# oficial postgres de Docker.
+# PASO 0.5: NSS Wrapper para UIDs dinámicos de Pterodactyl
 # -------------------------------------------------------
 CURRENT_UID=$(id -u)
 CURRENT_GID=$(id -g)
@@ -120,30 +110,33 @@ chmod 700 "$PGDATA"
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "  Inicializando cluster PostgreSQL en $PGDATA..."
 
-    # Detectar el directorio de share de PostgreSQL.
-    # initdb necesita que se le pase con -L explícitamente —
-    # PGSHAREPATH NO funciona en todos los builds de PG16.
+    # Buscar el share que contenga postgres.bki Y postgresql.conf.sample
+    # El instalador los copia a pg_bin/share/16/
     PG_SHARE=""
     for candidate in \
-        "/home/container/pg_bin/share/16" \
-        "/home/container/pg_bin/share/postgresql/16" \
-        "/home/container/pg_bin/share/postgresql" \
-        "/home/container/pg_bin/share"; do
-        if [ -f "${candidate}/postgres.bki" ]; then
+        "${PG_SHARE_BASE}/16" \
+        "${PG_SHARE_BASE}/postgresql/16" \
+        "${PG_SHARE_BASE}"; do
+        if [ -f "${candidate}/postgres.bki" ] && [ -f "${candidate}/postgresql.conf.sample" ]; then
             PG_SHARE="$candidate"
             break
         fi
     done
 
     if [ -z "$PG_SHARE" ]; then
-        echo "ERROR FATAL: No se encontro postgres.bki en pg_bin/share."
-        echo "  Contenido de pg_bin/share:"
-        find /home/container/pg_bin/share -maxdepth 3 2>/dev/null || echo "  (vacio o no existe)"
-        echo "  Reinstala el servidor."
+        echo "ERROR FATAL: share de PostgreSQL incompleto o no encontrado."
+        echo "  Buscando postgres.bki:"
+        find "${PG_SHARE_BASE}" -name 'postgres.bki' 2>/dev/null || echo "  (no encontrado)"
+        echo "  Buscando postgresql.conf.sample:"
+        find "${PG_SHARE_BASE}" -name 'postgresql.conf.sample' 2>/dev/null || echo "  (no encontrado)"
+        echo "  Estructura de pg_bin/share:"
+        find "${PG_SHARE_BASE}" -maxdepth 3 2>/dev/null | head -30
+        echo "  => Reinstala el servidor desde el panel de Pterodactyl."
         exit 1
     fi
 
     echo "  Usando share: $PG_SHARE"
+    echo "  Archivos en share: $(ls $PG_SHARE | wc -l)"
 
     if ! initdb -D "$PGDATA" -L "$PG_SHARE" \
             --username=postgres --auth=trust \
@@ -151,12 +144,12 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
         echo "ERROR FATAL: initdb fallo."
         exit 1
     fi
-    echo "  Cluster inicializado."
+    echo "  Cluster inicializado correctamente."
 else
     echo "  Cluster existente en $PGDATA."
 fi
 
-# Sobreescribir pg_hba.conf con configuración permisiva local
+# Configurar pg_hba.conf
 cat > "$PGDATA/pg_hba.conf" << 'PGHBA'
 local   all             all                                     trust
 host    all             all             127.0.0.1/32            trust
@@ -174,9 +167,9 @@ fi
 
 echo "  Iniciando PostgreSQL..."
 pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" start -w -t 60
-PG_START_STATUS=$?
+PG_START_RC=$?
 
-if [ $PG_START_STATUS -ne 0 ]; then
+if [ $PG_START_RC -ne 0 ]; then
     echo "ERROR FATAL: pg_ctl no pudo iniciar PostgreSQL."
     tail -n 40 "$PGDATA/postgres.log" 2>/dev/null || echo "(log no disponible)"
     exit 1
@@ -199,8 +192,6 @@ if [ "$PG_READY" -eq 0 ]; then
     exit 1
 fi
 
-# Crear rol interno para que el proceso pueda operar sin pasar
-# siempre credenciales de postgres superusuario
 psql -h 127.0.0.1 -p 5432 -U postgres \
     -c "CREATE ROLE container WITH SUPERUSER LOGIN PASSWORD 'container';" \
     >/dev/null 2>&1 || true
