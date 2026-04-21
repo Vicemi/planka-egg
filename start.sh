@@ -2,7 +2,7 @@
 # ===========================================================
 # Planka v2 - Script de inicio para Pterodactyl
 # Imagen de runtime: ghcr.io/zastinian/esdock:nodejs_22
-# PostgreSQL embebido via binarios estáticos (instalados por el egg)
+# PostgreSQL embebido via binarios portátiles (musl) de theseus-rs
 # ===========================================================
 
 set -e
@@ -23,7 +23,7 @@ PG_LIB_DIR="/home/container/pg_bin/lib"
 
 if [ ! -d "$PG_BIN_DIR" ]; then
     echo "ERROR FATAL: Directorio de binarios PostgreSQL no encontrado: $PG_BIN_DIR"
-    echo "  Vuelve a ejecutar la instalacion del egg para regenerar los binarios."
+    echo "  Reinstala el servidor para regenerar los binarios."
     exit 1
 fi
 
@@ -32,22 +32,22 @@ export LD_LIBRARY_PATH="${PG_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 
 # Verificar que los binarios clave existan
 for bin in initdb pg_ctl pg_isready psql createdb; do
-    if ! command -v "$bin" &>/dev/null; then
+    if [ ! -f "${PG_BIN_DIR}/${bin}" ]; then
         echo "ERROR FATAL: Binario '$bin' no encontrado en $PG_BIN_DIR"
         exit 1
     fi
 done
 
-# Probar ejecución real de pg_ctl (detecta faltantes de bibliotecas)
-if ! pg_ctl --version &>/dev/null; then
-    echo "ERROR FATAL: No se puede ejecutar pg_ctl. Faltan bibliotecas compartidas."
-    echo "  Asegúrate de que $PG_LIB_DIR contenga las .so necesarias."
-    echo "  Contenido de $PG_LIB_DIR:"
-    ls -la "$PG_LIB_DIR" || echo "  (directorio vacío o inexistente)"
+# Los binarios musl son estáticamente enlazados: no necesitan LD_LIBRARY_PATH
+# pero lo exportamos igual por compatibilidad
+if ! "${PG_BIN_DIR}/pg_ctl" --version >/dev/null 2>&1; then
+    echo "ERROR FATAL: No se puede ejecutar pg_ctl."
+    echo "  Contenido de $PG_BIN_DIR:"
+    ls -la "$PG_BIN_DIR" || echo "  (directorio vacío)"
     exit 1
 fi
 
-echo "  PostgreSQL listo: $(pg_ctl --version)"
+echo "  PostgreSQL listo: $("${PG_BIN_DIR}/pg_ctl" --version)"
 
 # -------------------------------------------------------
 # PASO 1: Configurar e iniciar PostgreSQL
@@ -85,7 +85,10 @@ PGHBA
 sed -i "s|^#*listen_addresses.*|listen_addresses = '127.0.0.1'|" "$PGDATA/postgresql.conf"
 sed -i "s|^#*port = .*|port = 5432|" "$PGDATA/postgresql.conf"
 
-if ! grep -q "^unix_socket_directories" "$PGDATA/postgresql.conf"; then
+# Socket en /tmp (siempre escribible)
+if grep -q "^unix_socket_directories" "$PGDATA/postgresql.conf"; then
+    sed -i "s|^unix_socket_directories.*|unix_socket_directories = '/tmp'|" "$PGDATA/postgresql.conf"
+else
     echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
 fi
 
@@ -119,10 +122,10 @@ if [ "$PG_READY" -eq 0 ]; then
     exit 1
 fi
 
-# Crear rol container
+# Crear rol container si no existe
 psql -h 127.0.0.1 -p 5432 -U postgres \
     -c "CREATE ROLE container WITH SUPERUSER LOGIN PASSWORD 'container';" \
-    > /dev/null 2>&1 || true
+    >/dev/null 2>&1 || true
 
 export PGUSER=container
 export PGPASSWORD=container
@@ -142,20 +145,20 @@ USER_EXISTS=$(psql -h 127.0.0.1 -p 5432 -tAc \
 
 if [ "$USER_EXISTS" != "1" ]; then
     psql -h 127.0.0.1 -p 5432 \
-        -c "CREATE USER \"${DB_USER}\" WITH PASSWORD '${DB_PASSWORD}';" > /dev/null 2>&1
+        -c "CREATE USER \"${DB_USER}\" WITH PASSWORD '${DB_PASSWORD}';" >/dev/null 2>&1
     echo "  Usuario '${DB_USER}' creado."
 fi
 
 psql -h 127.0.0.1 -p 5432 \
-    -c "ALTER USER \"${DB_USER}\" WITH PASSWORD '${DB_PASSWORD}';" > /dev/null 2>&1
+    -c "ALTER USER \"${DB_USER}\" WITH PASSWORD '${DB_PASSWORD}';" >/dev/null 2>&1
 
 DB_EXISTS=$(psql -h 127.0.0.1 -p 5432 -tAc \
     "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" 2>/dev/null | tr -d '[:space:]')
 
 if [ "$DB_EXISTS" != "1" ]; then
-    createdb -h 127.0.0.1 -p 5432 -O "${DB_USER}" "${DB_NAME}" > /dev/null 2>&1
+    createdb -h 127.0.0.1 -p 5432 -O "${DB_USER}" "${DB_NAME}" >/dev/null 2>&1
     psql -h 127.0.0.1 -p 5432 \
-        -c "GRANT ALL PRIVILEGES ON DATABASE \"${DB_NAME}\" TO \"${DB_USER}\";" > /dev/null 2>&1
+        -c "GRANT ALL PRIVILEGES ON DATABASE \"${DB_NAME}\" TO \"${DB_USER}\";" >/dev/null 2>&1
     echo "  Base de datos '${DB_NAME}' creada."
 else
     echo "  Base de datos '${DB_NAME}' ya existe."
@@ -200,18 +203,12 @@ cat > /home/container/.env << ENVEOF
 ## === Planka - Generado automáticamente por start.sh ===
 ## No edites este archivo; se regenera en cada inicio.
 
-## Requerido
 BASE_URL=${BASE_URL}
 DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:5432/${DB_NAME}
 SECRET_KEY=${SECRET_KEY}
-
-## Puerto asignado por Pterodactyl
 PORT=${SERVER_PORT}
-
-## Proxy inverso: 'true' si usas nginx/Cloudflare, 'false' si accedes por IP:puerto
 TRUST_PROXY=${TRUST_PROXY:-false}
 
-## Administrador inicial (solo aplica la primera vez que se crea la cuenta)
 DEFAULT_ADMIN_EMAIL=${ADMIN_EMAIL}
 DEFAULT_ADMIN_USERNAME=${ADMIN_USERNAME}
 DEFAULT_ADMIN_PASSWORD=${ADMIN_PASSWORD}
@@ -228,7 +225,7 @@ fi
 echo "  .env aplicado correctamente."
 
 # -------------------------------------------------------
-# PASO 5: Inicializar BD de Planka y arrancar
+# PASO 5: Migrar BD e iniciar Planka
 # -------------------------------------------------------
 echo "[5/5] Migrando base de datos e iniciando Planka..."
 echo ""
@@ -240,13 +237,12 @@ echo "=========================================="
 
 cd /home/container
 
-# Migrar base de datos
 if ! npm run db:init; then
     echo "ERROR FATAL: La migración de la base de datos falló."
     exit 1
 fi
 
-# Función para detener PostgreSQL al salir
+# Detener PostgreSQL limpiamente al salir
 cleanup() {
     echo ""
     echo "Deteniendo PostgreSQL..."
@@ -255,7 +251,7 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# Arrancar Planka
+# Arrancar Planka en primer plano
 npm start &
 PLANKA_PID=$!
 wait $PLANKA_PID
