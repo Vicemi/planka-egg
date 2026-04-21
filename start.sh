@@ -6,7 +6,8 @@
 # postgres:16-bullseye durante la instalación
 # ===========================================================
 
-set -e
+# NOTA: NO usar "set -e" aquí — necesitamos controlar
+# manualmente los códigos de retorno de pg_ctl y psql.
 
 cd /home/container || { echo "ERROR: No se pudo acceder a /home/container"; exit 1; }
 
@@ -72,7 +73,6 @@ if ! getent passwd "$CURRENT_UID" > /dev/null 2>&1; then
     echo "  UID $CURRENT_UID no en /etc/passwd — activando libnss_wrapper..."
 
     NSS_WRAPPER_LIB=""
-    # Buscar libnss_wrapper copiado por el instalador
     for candidate in \
         "${PG_LIB_DIR}/libnss_wrapper.so" \
         "${PG_LIB_DIR}/libnss_wrapper.so.0" \
@@ -111,7 +111,6 @@ fi
 echo "[1/5] Configurando PostgreSQL..."
 
 export PGDATA=/home/container/postgresql_data
-export PGUSER=postgres
 export PGHOST=127.0.0.1
 export PGPORT=5432
 
@@ -121,18 +120,34 @@ chmod 700 "$PGDATA"
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "  Inicializando cluster PostgreSQL en $PGDATA..."
 
+    # Detectar el directorio de share de PostgreSQL.
+    # initdb necesita que se le pase con -L explícitamente —
+    # PGSHAREPATH NO funciona en todos los builds de PG16.
     PG_SHARE=""
-    if [ -d "/home/container/pg_bin/share/16" ]; then
-        PG_SHARE="/home/container/pg_bin/share/16"
-    elif [ -d "/home/container/pg_bin/share/postgresql/16" ]; then
-        PG_SHARE="/home/container/pg_bin/share/postgresql/16"
-    elif [ -d "/home/container/pg_bin/share" ]; then
-        PG_SHARE="/home/container/pg_bin/share"
+    for candidate in \
+        "/home/container/pg_bin/share/16" \
+        "/home/container/pg_bin/share/postgresql/16" \
+        "/home/container/pg_bin/share/postgresql" \
+        "/home/container/pg_bin/share"; do
+        if [ -f "${candidate}/postgres.bki" ]; then
+            PG_SHARE="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$PG_SHARE" ]; then
+        echo "ERROR FATAL: No se encontro postgres.bki en pg_bin/share."
+        echo "  Contenido de pg_bin/share:"
+        find /home/container/pg_bin/share -maxdepth 3 2>/dev/null || echo "  (vacio o no existe)"
+        echo "  Reinstala el servidor."
+        exit 1
     fi
 
-    [ -n "$PG_SHARE" ] && export PGSHAREPATH="$PG_SHARE"
+    echo "  Usando share: $PG_SHARE"
 
-    if ! initdb -D "$PGDATA" --username=postgres --auth=trust --locale=C --encoding=UTF8; then
+    if ! initdb -D "$PGDATA" -L "$PG_SHARE" \
+            --username=postgres --auth=trust \
+            --locale=C --encoding=UTF8; then
         echo "ERROR FATAL: initdb fallo."
         exit 1
     fi
@@ -141,6 +156,7 @@ else
     echo "  Cluster existente en $PGDATA."
 fi
 
+# Sobreescribir pg_hba.conf con configuración permisiva local
 cat > "$PGDATA/pg_hba.conf" << 'PGHBA'
 local   all             all                                     trust
 host    all             all             127.0.0.1/32            trust
@@ -148,7 +164,7 @@ host    all             all             ::1/128                 trust
 PGHBA
 
 sed -i "s|^#*listen_addresses.*|listen_addresses = '127.0.0.1'|" "$PGDATA/postgresql.conf"
-sed -i "s|^#*port = .*|port = 5432|" "$PGDATA/postgresql.conf"
+sed -i "s|^#*port = .*|port = 5432|"                              "$PGDATA/postgresql.conf"
 
 if grep -q "^unix_socket_directories" "$PGDATA/postgresql.conf"; then
     sed -i "s|^unix_socket_directories.*|unix_socket_directories = '/tmp'|" "$PGDATA/postgresql.conf"
@@ -158,8 +174,9 @@ fi
 
 echo "  Iniciando PostgreSQL..."
 pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" start -w -t 60
+PG_START_STATUS=$?
 
-if [ $? -ne 0 ]; then
+if [ $PG_START_STATUS -ne 0 ]; then
     echo "ERROR FATAL: pg_ctl no pudo iniciar PostgreSQL."
     tail -n 40 "$PGDATA/postgres.log" 2>/dev/null || echo "(log no disponible)"
     exit 1
@@ -182,6 +199,8 @@ if [ "$PG_READY" -eq 0 ]; then
     exit 1
 fi
 
+# Crear rol interno para que el proceso pueda operar sin pasar
+# siempre credenciales de postgres superusuario
 psql -h 127.0.0.1 -p 5432 -U postgres \
     -c "CREATE ROLE container WITH SUPERUSER LOGIN PASSWORD 'container';" \
     >/dev/null 2>&1 || true
@@ -248,14 +267,14 @@ fi
 # -------------------------------------------------------
 echo "[4/5] Aplicando configuracion..."
 
-if [ -z "${BASE_URL}" ]; then
-    BASE_URL="http://localhost:${SERVER_PORT}"
-    echo "  ADVERTENCIA: BASE_URL vacio. Usando $BASE_URL"
-fi
-
 if [ -z "${SERVER_PORT}" ]; then
     echo "ERROR FATAL: SERVER_PORT no definido."
     exit 1
+fi
+
+if [ -z "${BASE_URL}" ]; then
+    BASE_URL="http://localhost:${SERVER_PORT}"
+    echo "  ADVERTENCIA: BASE_URL vacio. Usando $BASE_URL"
 fi
 
 cat > /home/container/.env << ENVEOF
@@ -299,8 +318,7 @@ fi
 
 cleanup() {
     echo "Deteniendo PostgreSQL..."
-    pg_ctl -D "$PGDATA" stop -m fast || true
-    # Limpiar archivos temporales de NSS
+    pg_ctl -D "$PGDATA" stop -m fast 2>/dev/null || true
     rm -f "$NSS_WRAPPER_PASSWD" "$NSS_WRAPPER_GROUP" 2>/dev/null || true
     exit 0
 }
