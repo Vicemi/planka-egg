@@ -54,6 +54,36 @@ fi
 echo "  PostgreSQL: $(pg_ctl --version)"
 
 # -------------------------------------------------------
+# PASO 0.5: Registrar usuario actual en /etc/passwd
+#
+# initdb necesita que el UID del proceso exista en
+# /etc/passwd. Pterodactyl corre contenedores con UIDs
+# dinamicos (ej: 999) que no están registrados por defecto.
+# -------------------------------------------------------
+CURRENT_UID=$(id -u)
+CURRENT_GID=$(id -g)
+
+if ! getent passwd "$CURRENT_UID" > /dev/null 2>&1; then
+    echo "  UID $CURRENT_UID no registrado en /etc/passwd — creando entrada..."
+    # Intentar escribir en /etc/passwd (funciona si no es read-only)
+    if echo "container:x:${CURRENT_UID}:${CURRENT_GID}:container:/home/container:/bin/bash" >> /etc/passwd 2>/dev/null; then
+        echo "  Entrada creada correctamente."
+    else
+        echo "  ADVERTENCIA: No se pudo escribir en /etc/passwd."
+        echo "  Intentando via NSS override..."
+        # Alternativa: usar variable de entorno que algunos sistemas respetan
+        export USER=container
+        export LOGNAME=container
+    fi
+else
+    echo "  Usuario UID=$CURRENT_UID ya existe en /etc/passwd."
+fi
+
+# Asegurar que HOME y USER estén definidos (initdb los usa)
+export HOME=/home/container
+export USER=${USER:-container}
+
+# -------------------------------------------------------
 # PASO 1: Configurar e iniciar PostgreSQL
 # -------------------------------------------------------
 echo "[1/5] Configurando PostgreSQL..."
