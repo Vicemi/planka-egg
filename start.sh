@@ -2,7 +2,8 @@
 # ===========================================================
 # Planka v2 - Script de inicio para Pterodactyl
 # Imagen de runtime: ghcr.io/zastinian/esdock:nodejs_22
-# PostgreSQL embebido via binarios portátiles (musl) de theseus-rs
+# PostgreSQL embebido: binarios nativos copiados desde
+# postgres:16-bullseye durante la instalación
 # ===========================================================
 
 set -e
@@ -14,7 +15,7 @@ echo "   Planka - Iniciando servidor"
 echo "=========================================="
 
 # -------------------------------------------------------
-# PASO 0: Configurar PATH para PostgreSQL embebido
+# PASO 0: Configurar PATH y librerías para PostgreSQL
 # -------------------------------------------------------
 echo "[0/5] Configurando entorno de PostgreSQL..."
 
@@ -22,32 +23,35 @@ PG_BIN_DIR="/home/container/pg_bin/bin"
 PG_LIB_DIR="/home/container/pg_bin/lib"
 
 if [ ! -d "$PG_BIN_DIR" ]; then
-    echo "ERROR FATAL: Directorio de binarios PostgreSQL no encontrado: $PG_BIN_DIR"
-    echo "  Reinstala el servidor para regenerar los binarios."
+    echo "ERROR FATAL: No se encontro el directorio de binarios: $PG_BIN_DIR"
+    echo "  Reinstala el servidor desde el panel de Pterodactyl."
     exit 1
 fi
 
-export PATH="${PG_BIN_DIR}:$PATH"
+# Las libs copiadas van PRIMERO para que PG use las versiones con las que fue compilado
 export LD_LIBRARY_PATH="${PG_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+export PATH="${PG_BIN_DIR}:$PATH"
 
-# Verificar que los binarios clave existan
+# Verificar binarios
 for bin in initdb pg_ctl pg_isready psql createdb; do
     if [ ! -f "${PG_BIN_DIR}/${bin}" ]; then
-        echo "ERROR FATAL: Binario '$bin' no encontrado en $PG_BIN_DIR"
+        echo "ERROR FATAL: Binario faltante: ${PG_BIN_DIR}/${bin}"
         exit 1
     fi
 done
 
-# Los binarios musl son estáticamente enlazados: no necesitan LD_LIBRARY_PATH
-# pero lo exportamos igual por compatibilidad
-if ! "${PG_BIN_DIR}/pg_ctl" --version >/dev/null 2>&1; then
+# Probar ejecución
+if ! pg_ctl --version >/dev/null 2>&1; then
     echo "ERROR FATAL: No se puede ejecutar pg_ctl."
-    echo "  Contenido de $PG_BIN_DIR:"
-    ls -la "$PG_BIN_DIR" || echo "  (directorio vacío)"
+    echo "  LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+    echo "  Libs en $PG_LIB_DIR:"
+    ls "$PG_LIB_DIR" 2>/dev/null || echo "  (vacio)"
+    echo "  ldd:"
+    ldd "${PG_BIN_DIR}/postgres" 2>&1 || true
     exit 1
 fi
 
-echo "  PostgreSQL listo: $("${PG_BIN_DIR}/pg_ctl" --version)"
+echo "  PostgreSQL: $(pg_ctl --version)"
 
 # -------------------------------------------------------
 # PASO 1: Configurar e iniciar PostgreSQL
@@ -62,48 +66,57 @@ export PGPORT=5432
 mkdir -p "$PGDATA"
 chmod 700 "$PGDATA"
 
-# Inicializar clúster si no existe
+# Inicializar cluster si no existe
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
-    echo "  Inicializando clúster PostgreSQL en $PGDATA..."
+    echo "  Inicializando cluster PostgreSQL en $PGDATA..."
+
+    # El share/ de PG (timezones, etc.) debe estar disponible
+    PG_SHARE=""
+    if [ -d "/home/container/pg_bin/share/16" ]; then
+        PG_SHARE="/home/container/pg_bin/share/16"
+    elif [ -d "/home/container/pg_bin/share/postgresql/16" ]; then
+        PG_SHARE="/home/container/pg_bin/share/postgresql/16"
+    elif [ -d "/home/container/pg_bin/share" ]; then
+        PG_SHARE="/home/container/pg_bin/share"
+    fi
+
+    [ -n "$PG_SHARE" ] && export PGSHAREPATH="$PG_SHARE"
+
     if ! initdb -D "$PGDATA" --username=postgres --auth=trust --locale=C --encoding=UTF8; then
-        echo "ERROR FATAL: initdb falló."
+        echo "ERROR FATAL: initdb fallo."
         exit 1
     fi
-    echo "  Clúster inicializado correctamente."
+    echo "  Cluster inicializado."
 else
-    echo "  Clúster existente detectado en $PGDATA."
+    echo "  Cluster existente en $PGDATA."
 fi
 
-# Configurar pg_hba.conf
+# pg_hba.conf
 cat > "$PGDATA/pg_hba.conf" << 'PGHBA'
 local   all             all                                     trust
 host    all             all             127.0.0.1/32            trust
 host    all             all             ::1/128                 trust
 PGHBA
 
-# Configurar postgresql.conf
+# postgresql.conf
 sed -i "s|^#*listen_addresses.*|listen_addresses = '127.0.0.1'|" "$PGDATA/postgresql.conf"
 sed -i "s|^#*port = .*|port = 5432|" "$PGDATA/postgresql.conf"
 
-# Socket en /tmp (siempre escribible)
 if grep -q "^unix_socket_directories" "$PGDATA/postgresql.conf"; then
     sed -i "s|^unix_socket_directories.*|unix_socket_directories = '/tmp'|" "$PGDATA/postgresql.conf"
 else
     echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
 fi
 
-# Iniciar PostgreSQL
 echo "  Iniciando PostgreSQL..."
 pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" start -w -t 60
 
 if [ $? -ne 0 ]; then
     echo "ERROR FATAL: pg_ctl no pudo iniciar PostgreSQL."
-    echo "--- Últimas líneas del log ---"
-    tail -n 30 "$PGDATA/postgres.log" 2>/dev/null || echo "(log no disponible)"
+    tail -n 40 "$PGDATA/postgres.log" 2>/dev/null || echo "(log no disponible)"
     exit 1
 fi
 
-# Esperar a que esté listo
 PG_READY=0
 for i in $(seq 1 30); do
     if pg_isready -q -h 127.0.0.1 -p 5432 -U postgres; then
@@ -116,13 +129,11 @@ for i in $(seq 1 30); do
 done
 
 if [ "$PG_READY" -eq 0 ]; then
-    echo "ERROR FATAL: PostgreSQL no respondió a tiempo."
-    echo "--- Log ---"
-    tail -n 30 "$PGDATA/postgres.log" 2>/dev/null
+    echo "ERROR FATAL: PostgreSQL no respondio a tiempo."
+    tail -n 40 "$PGDATA/postgres.log" 2>/dev/null
     exit 1
 fi
 
-# Crear rol container si no existe
 psql -h 127.0.0.1 -p 5432 -U postgres \
     -c "CREATE ROLE container WITH SUPERUSER LOGIN PASSWORD 'container';" \
     >/dev/null 2>&1 || true
@@ -136,7 +147,7 @@ export PGPASSWORD=container
 echo "[2/5] Configurando base de datos..."
 
 if [ -z "${DB_NAME}" ] || [ -z "${DB_USER}" ] || [ -z "${DB_PASSWORD}" ]; then
-    echo "ERROR FATAL: Las variables DB_NAME, DB_USER y DB_PASSWORD son obligatorias."
+    echo "ERROR FATAL: DB_NAME, DB_USER y DB_PASSWORD son obligatorias."
     exit 1
 fi
 
@@ -164,7 +175,7 @@ else
     echo "  Base de datos '${DB_NAME}' ya existe."
 fi
 
-echo "  Base de datos OK."
+echo "  BD OK."
 
 # -------------------------------------------------------
 # PASO 3: SECRET_KEY persistente
@@ -174,7 +185,7 @@ SECRET_FILE="/home/container/.secret_key"
 
 if [ ! -f "$SECRET_FILE" ] || [ ! -s "$SECRET_FILE" ]; then
     openssl rand -hex 64 > "$SECRET_FILE"
-    echo "  SECRET_KEY generada por primera vez."
+    echo "  SECRET_KEY generada."
 fi
 
 SECRET_KEY=$(cat "$SECRET_FILE")
@@ -187,21 +198,21 @@ fi
 # -------------------------------------------------------
 # PASO 4: Escribir .env
 # -------------------------------------------------------
-echo "[4/5] Aplicando configuración del panel..."
+echo "[4/5] Aplicando configuracion..."
 
 if [ -z "${BASE_URL}" ]; then
-    echo "  ADVERTENCIA: BASE_URL está vacío. Usando http://localhost:${SERVER_PORT}"
     BASE_URL="http://localhost:${SERVER_PORT}"
+    echo "  ADVERTENCIA: BASE_URL vacio. Usando $BASE_URL"
 fi
 
 if [ -z "${SERVER_PORT}" ]; then
-    echo "ERROR FATAL: SERVER_PORT no está definido por Pterodactyl."
+    echo "ERROR FATAL: SERVER_PORT no definido."
     exit 1
 fi
 
 cat > /home/container/.env << ENVEOF
-## === Planka - Generado automáticamente por start.sh ===
-## No edites este archivo; se regenera en cada inicio.
+## === Planka - Generado por start.sh ===
+## Se regenera en cada inicio. No editar manualmente.
 
 BASE_URL=${BASE_URL}
 DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:5432/${DB_NAME}
@@ -215,17 +226,13 @@ DEFAULT_ADMIN_PASSWORD=${ADMIN_PASSWORD}
 DEFAULT_ADMIN_NAME=${ADMIN_NAME}
 ENVEOF
 
-if [ -n "${SMTP_URI}" ]; then
-    echo "SMTP_URI=${SMTP_URI}" >> /home/container/.env
-fi
-if [ -n "${SMTP_FROM}" ]; then
-    echo "SMTP_FROM=${SMTP_FROM}" >> /home/container/.env
-fi
+[ -n "${SMTP_URI}"  ] && echo "SMTP_URI=${SMTP_URI}"   >> /home/container/.env
+[ -n "${SMTP_FROM}" ] && echo "SMTP_FROM=${SMTP_FROM}" >> /home/container/.env
 
-echo "  .env aplicado correctamente."
+echo "  .env aplicado."
 
 # -------------------------------------------------------
-# PASO 5: Migrar BD e iniciar Planka
+# PASO 5: Migrar BD y arrancar Planka
 # -------------------------------------------------------
 echo "[5/5] Migrando base de datos e iniciando Planka..."
 echo ""
@@ -238,20 +245,17 @@ echo "=========================================="
 cd /home/container
 
 if ! npm run db:init; then
-    echo "ERROR FATAL: La migración de la base de datos falló."
+    echo "ERROR FATAL: Migracion de la base de datos fallo."
     exit 1
 fi
 
-# Detener PostgreSQL limpiamente al salir
 cleanup() {
-    echo ""
     echo "Deteniendo PostgreSQL..."
     pg_ctl -D "$PGDATA" stop -m fast || true
     exit 0
 }
 trap cleanup SIGTERM SIGINT
 
-# Arrancar Planka en primer plano
 npm start &
 PLANKA_PID=$!
 wait $PLANKA_PID
