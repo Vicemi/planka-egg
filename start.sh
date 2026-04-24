@@ -161,14 +161,13 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
         echo "  ${subdir}: ${COUNT} archivos OK"
     done
 
-    # --- INICIO CORRECCIÓN ---
-    # Forzamos la ruta de abreviaturas horarias para evitar que busque
-    # en /usr/share/postgresql/16/timezonesets, ignorando -L
+    # Añadir timezone_abbreviations a la plantilla de configuración
+    # para que el bootstrap lo use correctamente desde nuestro share
+    echo "timezone_abbreviations = 'Default'" >> "$PG_SHARE/postgresql.conf.sample"
+
     if ! initdb -D "$PGDATA" -L "$PG_SHARE" \
             --username=postgres --auth=trust \
-            --locale=C --encoding=UTF8 \
-            -c timezone_abbreviations="${PG_SHARE}/timezonesets/Default"; then
-    # --- FIN CORRECCIÓN ---
+            --locale=C --encoding=UTF8; then
         echo "ERROR FATAL: initdb fallo."
         echo ""
         echo "  Contenido de $PG_SHARE:"
@@ -198,10 +197,6 @@ if grep -q "^unix_socket_directories" "$PGDATA/postgresql.conf"; then
 else
     echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
 fi
-
-# --- CORRECCIÓN ADICIONAL: fijar abreviaturas en la configuración permanente ---
-echo "timezone_abbreviations = '${PG_SHARE}/timezonesets/Default'" >> "$PGDATA/postgresql.conf"
-# -------------------------------------------------------------------------
 
 echo "  Iniciando PostgreSQL..."
 pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" start -w -t 60
