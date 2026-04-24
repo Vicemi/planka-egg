@@ -111,7 +111,6 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "  Inicializando cluster PostgreSQL en $PGDATA..."
 
     # Buscar el share que contenga postgres.bki Y postgresql.conf.sample
-    # El instalador los copia a pg_bin/share/16/
     PG_SHARE=""
     for candidate in \
         "${PG_SHARE_BASE}/16" \
@@ -136,12 +135,42 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
     fi
 
     echo "  Usando share: $PG_SHARE"
-    echo "  Archivos en share: $(ls $PG_SHARE | wc -l)"
+    echo "  Archivos en share: $(ls "$PG_SHARE" | wc -l)"
+
+    # -----------------------------------------------------------
+    # VERIFICACION CRITICA: timezonesets debe existir y tener
+    # archivos. Si esta vacio o ausente, initdb falla buscando
+    # la ruta del sistema (/usr/share/postgresql/16/timezonesets)
+    # -----------------------------------------------------------
+    echo "  Verificando subdirectorios criticos del share..."
+    for subdir in timezonesets timezone tsearch_data; do
+        SUBDIR_PATH="${PG_SHARE}/${subdir}"
+        COUNT=0
+        [ -d "$SUBDIR_PATH" ] && COUNT=$(ls "$SUBDIR_PATH" 2>/dev/null | wc -l)
+
+        if [ "$COUNT" -eq 0 ]; then
+            echo "  ERROR: ${subdir} faltante o vacio en ${PG_SHARE}"
+            echo "  Estructura actual del share:"
+            find "$PG_SHARE" -maxdepth 2 2>/dev/null | head -30
+            echo ""
+            echo "  Este error se produce cuando el instalador no copio"
+            echo "  correctamente los subdirectorios de PostgreSQL."
+            echo "  => Reinstala el servidor desde el panel de Pterodactyl."
+            exit 1
+        fi
+        echo "  ${subdir}: ${COUNT} archivos OK"
+    done
 
     if ! initdb -D "$PGDATA" -L "$PG_SHARE" \
             --username=postgres --auth=trust \
             --locale=C --encoding=UTF8; then
         echo "ERROR FATAL: initdb fallo."
+        echo ""
+        echo "  Contenido de $PG_SHARE:"
+        ls -la "$PG_SHARE" 2>/dev/null
+        echo ""
+        echo "  Contenido de $PG_SHARE/timezonesets:"
+        ls "$PG_SHARE/timezonesets" 2>/dev/null | head -10 || echo "  (vacio o no existe)"
         exit 1
     fi
     echo "  Cluster inicializado correctamente."
