@@ -163,7 +163,8 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
 
     if ! initdb -D "$PGDATA" -L "$PG_SHARE" \
             --username=postgres --auth=trust \
-            --locale=C --encoding=UTF8; then
+            --locale=C --encoding=UTF8 \
+            -c timezone_abbreviations="${PG_SHARE}/timezonesets/Default"; then
         echo "ERROR FATAL: initdb fallo."
         echo ""
         echo "  Contenido de $PG_SHARE:"
