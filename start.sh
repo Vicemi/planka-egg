@@ -258,6 +258,7 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-npm start &
+# ── CAMBIO IMPORTANTE: Usamos el comando de producción en lugar de "nodemon" ──
+npm run start:prod &
 PLANKA_PID=$!
 wait $PLANKA_PID
