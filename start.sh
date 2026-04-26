@@ -31,7 +31,6 @@ echo "[0/5] Verificando variables de entorno..."
 : "${DB_NAME:?}"     || die "DB_NAME no definida"
 : "${DB_USER:?}"     || die "DB_USER no definida"
 : "${DB_PASSWORD:?}" || die "DB_PASSWORD no definida"
-: "${PLANKA_PORT:?}" || die "PLANKA_PORT no definida"
 : "${ADMIN_EMAIL:?}" || die "ADMIN_EMAIL no definida"
 : "${ADMIN_USERNAME:?}" || die "ADMIN_USERNAME no definida"
 : "${ADMIN_PASSWORD:?}" || die "ADMIN_PASSWORD no definida"
@@ -221,7 +220,7 @@ cat > /home/container/.env << ENVEOF
 BASE_URL=${BASE_URL}
 DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:5432/${DB_NAME}
 SECRET_KEY=${SECRET_KEY}
-PORT=${PLANKA_PORT}
+PORT=${SERVER_PORT}
 TRUST_PROXY=${TRUST_PROXY:-false}
 
 DEFAULT_ADMIN_EMAIL=${ADMIN_EMAIL}
