@@ -36,7 +36,7 @@ echo "[0/5] Verificando variables de entorno..."
 : "${ADMIN_PASSWORD:?}" || die "ADMIN_PASSWORD no definida"
 : "${ADMIN_NAME:?}"  || die "ADMIN_NAME no definida"
 
-BASE_URL="${BASE_URL:-http://localhost:${PLANKA_PORT}}"
+BASE_URL="${BASE_URL:-http://localhost:${SERVER_PORT}}"
 ok "Variables OK"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,7 +240,7 @@ ok ".env generado"
 echo ""
 echo "[5/5] Migrando base de datos e iniciando Planka..."
 echo ""
-echo "  Puerto : ${PLANKA_PORT}"
+echo "  Puerto : ${SERVER_PORT}"
 echo "  URL    : ${BASE_URL}"
 echo "  Admin  : ${ADMIN_EMAIL}"
 echo ""
