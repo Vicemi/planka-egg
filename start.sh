@@ -1,83 +1,75 @@
 #!/bin/bash
 # ===========================================================
 # Planka v2 - Script de inicio para Pterodactyl
-# Imagen de runtime: ghcr.io/zastinian/esdock:nodejs_22
-# PostgreSQL embebido: binarios copiados durante instalación
+# Yolk      : ghcr.io/vicemi/planka-egg:latest
+# Node.js   : 22 (nativo en la imagen)
+# PostgreSQL: 16 (nativo en la imagen, /usr/lib/postgresql/16)
 # Repositorio: https://github.com/Vicemi/planka-egg
 # ===========================================================
+
+set -euo pipefail
 
 cd /home/container || { echo "ERROR: No se pudo acceder a /home/container"; exit 1; }
 
 echo "=========================================="
-echo "   Planka v2 - Iniciando servidor"
+echo "   Planka v2 — Iniciando"
+echo "   Yolk: ghcr.io/vicemi/planka-egg:latest"
 echo "=========================================="
 
-# -------------------------------------------------------
-# PASO 0: Configurar PATH y entorno de PostgreSQL
-# -------------------------------------------------------
-echo "[0/5] Configurando entorno..."
+# ── Colores para logs ─────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+ok()   { echo -e "${GREEN}  ✓ $*${NC}"; }
+warn() { echo -e "${YELLOW}  ⚠ $*${NC}"; }
+die()  { echo -e "${RED}  ✗ FATAL: $*${NC}"; exit 1; }
 
-PG_BIN_DIR="/home/container/pg_bin/bin"
-PG_LIB_DIR="/home/container/pg_bin/lib"
-PG_SHARE_BASE="/home/container/pg_bin/share"
+# ─────────────────────────────────────────────────────────────────────────────
+# PASO 0: Verificar variables obligatorias
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "[0/5] Verificando variables de entorno..."
 
-if [ ! -d "$PG_BIN_DIR" ]; then
-    echo "ERROR FATAL: No se encontró pg_bin/bin — reinstala el servidor."
-    exit 1
-fi
+: "${DB_NAME:?}"     || die "DB_NAME no definida"
+: "${DB_USER:?}"     || die "DB_USER no definida"
+: "${DB_PASSWORD:?}" || die "DB_PASSWORD no definida"
+: "${SERVER_PORT:?}" || die "SERVER_PORT no definida"
+: "${ADMIN_EMAIL:?}" || die "ADMIN_EMAIL no definida"
+: "${ADMIN_USERNAME:?}" || die "ADMIN_USERNAME no definida"
+: "${ADMIN_PASSWORD:?}" || die "ADMIN_PASSWORD no definida"
+: "${ADMIN_NAME:?}"  || die "ADMIN_NAME no definida"
 
-export LD_LIBRARY_PATH="${PG_LIB_DIR}:${LD_LIBRARY_PATH:-}"
-export PATH="${PG_BIN_DIR}:$PATH"
-export HOME=/home/container
-export USER=${USER:-container}
+BASE_URL="${BASE_URL:-http://localhost:${SERVER_PORT}}"
+ok "Variables OK"
 
-# Verificar binarios esenciales
-for bin in initdb pg_ctl pg_isready psql createdb; do
-    if [ ! -f "${PG_BIN_DIR}/${bin}" ]; then
-        echo "ERROR FATAL: Binario faltante: ${PG_BIN_DIR}/${bin} — reinstala el servidor."
-        exit 1
-    fi
-done
+# ─────────────────────────────────────────────────────────────────────────────
+# PASO 1: Verificar binarios de Node.js y PostgreSQL
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "[1/5] Verificando binarios..."
 
-# Verificar que pg_ctl funcione (libs OK)
-if ! pg_ctl --version >/dev/null 2>&1; then
-    echo "ERROR FATAL: pg_ctl no se puede ejecutar. Diagnóstico:"
-    echo "  LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
-    echo "  Libs disponibles en $PG_LIB_DIR:"
-    ls "$PG_LIB_DIR" 2>/dev/null | head -20 || echo "  (vacío)"
-    echo "  Dependencias faltantes de postgres:"
-    ldd "${PG_BIN_DIR}/postgres" 2>&1 | grep "not found" || echo "  (ninguna detectada)"
-    echo "  => Reinstala el servidor desde el panel de Pterodactyl."
-    exit 1
-fi
+command -v node   >/dev/null 2>&1 || die "node no encontrado en PATH"
+command -v npm    >/dev/null 2>&1 || die "npm no encontrado en PATH"
+command -v initdb >/dev/null 2>&1 || die "initdb no encontrado — verifica que el yolk tenga PostgreSQL 16"
+command -v pg_ctl >/dev/null 2>&1 || die "pg_ctl no encontrado"
+command -v psql   >/dev/null 2>&1 || die "psql no encontrado"
 
-echo "  PostgreSQL: $(pg_ctl --version)"
+ok "Node.js : $(node --version)"
+ok "npm     : $(npm --version)"
+ok "pg_ctl  : $(pg_ctl --version)"
 
-# -------------------------------------------------------
-# PASO 0.5: NSS Wrapper para UIDs dinámicos de Pterodactyl
-# -------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# PASO 2: NSS Wrapper (UIDs dinámicos de Pterodactyl)
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "[2/5] Configurando identidad de usuario..."
+
 CURRENT_UID=$(id -u)
 CURRENT_GID=$(id -g)
 
-if ! getent passwd "$CURRENT_UID" > /dev/null 2>&1; then
-    echo "  UID $CURRENT_UID no encontrado en /etc/passwd — activando libnss_wrapper..."
+if ! getent passwd "$CURRENT_UID" >/dev/null 2>&1; then
+    warn "UID $CURRENT_UID no registrado — activando libnss_wrapper"
 
-    NSS_WRAPPER_LIB=""
-    for candidate in \
-        "${PG_LIB_DIR}/libnss_wrapper.so" \
-        "${PG_LIB_DIR}/libnss_wrapper.so.0" \
-        "/usr/lib/x86_64-linux-gnu/libnss_wrapper.so" \
-        "/usr/lib/libnss_wrapper.so"; do
-        if [ -f "$candidate" ]; then
-            NSS_WRAPPER_LIB="$candidate"
-            break
-        fi
-    done
-
-    if [ -z "$NSS_WRAPPER_LIB" ]; then
-        echo "ERROR FATAL: libnss_wrapper.so no encontrado — reinstala el servidor."
-        exit 1
-    fi
+    NSS_WRAPPER_LIB=$(find /usr/lib -name 'libnss_wrapper.so*' 2>/dev/null | head -1)
+    [ -n "$NSS_WRAPPER_LIB" ] || die "libnss_wrapper.so no encontrado en la imagen"
 
     PASSWD_FILE="/tmp/planka_passwd_$$"
     GROUP_FILE="/tmp/planka_group_$$"
@@ -87,55 +79,16 @@ if ! getent passwd "$CURRENT_UID" > /dev/null 2>&1; then
     export NSS_WRAPPER_PASSWD="$PASSWD_FILE"
     export NSS_WRAPPER_GROUP="$GROUP_FILE"
     export LD_PRELOAD="${NSS_WRAPPER_LIB}${LD_PRELOAD:+:$LD_PRELOAD}"
-    echo "  libnss_wrapper activo: $NSS_WRAPPER_LIB"
+    ok "libnss_wrapper activado: $NSS_WRAPPER_LIB"
 else
-    echo "  UID $CURRENT_UID ya registrado en /etc/passwd."
+    ok "UID $CURRENT_UID ya registrado en /etc/passwd"
 fi
 
-# -------------------------------------------------------
-# PASO 1: Localizar share de PostgreSQL
-# -------------------------------------------------------
-echo "[1/5] Localizando share de PostgreSQL..."
-
-PG_SHARE=""
-for candidate in \
-    "${PG_SHARE_BASE}/16" \
-    "${PG_SHARE_BASE}/postgresql/16" \
-    "${PG_SHARE_BASE}"; do
-    if [ -f "${candidate}/postgres.bki" ] && \
-       [ -f "${candidate}/postgresql.conf.sample" ] && \
-       [ -d "${candidate}/timezonesets" ] && \
-       [ -d "${candidate}/timezone" ]; then
-        PG_SHARE="$candidate"
-        break
-    fi
-done
-
-if [ -z "$PG_SHARE" ]; then
-    echo "ERROR FATAL: Share de PostgreSQL incompleto o no encontrado en $PG_SHARE_BASE"
-    echo "  Estructura actual:"
-    find "$PG_SHARE_BASE" -maxdepth 3 2>/dev/null | head -30
-    echo "  => Reinstala el servidor desde el panel de Pterodactyl."
-    exit 1
-fi
-
-echo "  Share OK: $PG_SHARE"
-
-# Verificar subdirectorios críticos
-for subdir in timezonesets timezone tsearch_data; do
-    COUNT=$(ls "${PG_SHARE}/${subdir}" 2>/dev/null | wc -l)
-    if [ "$COUNT" -eq 0 ]; then
-        echo "ERROR FATAL: ${subdir} faltante o vacío en ${PG_SHARE}"
-        echo "  => Reinstala el servidor desde el panel de Pterodactyl."
-        exit 1
-    fi
-    echo "  ${subdir}: ${COUNT} archivos OK"
-done
-
-# -------------------------------------------------------
-# PASO 2: Iniciar PostgreSQL
-# -------------------------------------------------------
-echo "[2/5] Configurando PostgreSQL..."
+# ─────────────────────────────────────────────────────────────────────────────
+# PASO 3: PostgreSQL — inicializar y arrancar
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "[3/5] Configurando PostgreSQL..."
 
 export PGDATA=/home/container/postgresql_data
 export PGHOST=127.0.0.1
@@ -144,20 +97,34 @@ export PGPORT=5432
 mkdir -p "$PGDATA"
 chmod 700 "$PGDATA"
 
+# Detectar share de PostgreSQL automáticamente
+PG_SHARE=""
+for candidate in \
+    "/usr/share/postgresql/16" \
+    "/usr/share/postgresql"; do
+    if [ -f "${candidate}/postgres.bki" ]; then
+        PG_SHARE="$candidate"
+        break
+    fi
+done
+[ -n "$PG_SHARE" ] || die "Share de PostgreSQL no encontrado — el yolk puede estar mal construido"
+ok "Share PG: $PG_SHARE"
+
+# Inicializar cluster si no existe
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
     echo "  Inicializando cluster PostgreSQL..."
-    if ! initdb -D "$PGDATA" -L "$PG_SHARE" \
-            --username=postgres --auth=trust \
-            --locale=C --encoding=UTF8; then
-        echo "ERROR FATAL: initdb falló."
-        exit 1
-    fi
-    echo "  Cluster inicializado."
+    initdb -D "$PGDATA" \
+           --username=postgres \
+           --auth=trust \
+           --locale=C \
+           --encoding=UTF8 \
+           >/dev/null 2>&1 || die "initdb falló"
+    ok "Cluster inicializado"
 else
-    echo "  Cluster existente en $PGDATA."
+    ok "Cluster existente en $PGDATA"
 fi
 
-# Escribir pg_hba.conf
+# Configurar pg_hba.conf
 cat > "$PGDATA/pg_hba.conf" << 'PGHBA'
 local   all   all                  trust
 host    all   all   127.0.0.1/32   trust
@@ -165,43 +132,38 @@ host    all   all   ::1/128        trust
 PGHBA
 
 # Configurar postgresql.conf
-sed -i "s|^#*listen_addresses.*|listen_addresses = '127.0.0.1'|" "$PGDATA/postgresql.conf"
-sed -i "s|^#*port = .*|port = 5432|"                              "$PGDATA/postgresql.conf"
+{
+    grep -v -E "^#*(listen_addresses|port|unix_socket_directories)" "$PGDATA/postgresql.conf"
+    echo "listen_addresses = '127.0.0.1'"
+    echo "port = 5432"
+    echo "unix_socket_directories = '/tmp'"
+} > "$PGDATA/postgresql.conf.new"
+mv "$PGDATA/postgresql.conf.new" "$PGDATA/postgresql.conf"
 
-if grep -q "^unix_socket_directories" "$PGDATA/postgresql.conf"; then
-    sed -i "s|^unix_socket_directories.*|unix_socket_directories = '/tmp'|" "$PGDATA/postgresql.conf"
-else
-    echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
-fi
+# Arrancar PostgreSQL
+echo "  Arrancando PostgreSQL..."
+pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" start -w -t 60 >/dev/null 2>&1 || {
+    echo "  Log de error:"
+    tail -n 30 "$PGDATA/postgres.log" 2>/dev/null
+    die "pg_ctl no pudo arrancar PostgreSQL"
+}
 
-echo "  Iniciando PostgreSQL..."
-pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" start -w -t 60
-if [ $? -ne 0 ]; then
-    echo "ERROR FATAL: pg_ctl no pudo iniciar PostgreSQL."
-    echo "  Últimas líneas del log:"
-    tail -n 40 "$PGDATA/postgres.log" 2>/dev/null || echo "  (log no disponible)"
-    exit 1
-fi
-
-# Esperar a que PostgreSQL esté listo
+# Esperar que esté listo
 PG_READY=0
 for i in $(seq 1 30); do
     if pg_isready -q -h 127.0.0.1 -p 5432 -U postgres; then
         PG_READY=1
-        echo "  PostgreSQL listo (intento $i/30)."
         break
     fi
-    echo "  Esperando PostgreSQL... ($i/30)"
     sleep 2
 done
+[ "$PG_READY" -eq 1 ] || {
+    tail -n 30 "$PGDATA/postgres.log" 2>/dev/null
+    die "PostgreSQL no respondió a tiempo"
+}
+ok "PostgreSQL listo"
 
-if [ "$PG_READY" -eq 0 ]; then
-    echo "ERROR FATAL: PostgreSQL no respondió a tiempo."
-    tail -n 40 "$PGDATA/postgres.log" 2>/dev/null
-    exit 1
-fi
-
-# Crear rol de trabajo interno
+# Rol interno de trabajo
 psql -h 127.0.0.1 -p 5432 -U postgres \
     -c "CREATE ROLE container WITH SUPERUSER LOGIN PASSWORD 'container';" \
     >/dev/null 2>&1 || true
@@ -209,72 +171,51 @@ psql -h 127.0.0.1 -p 5432 -U postgres \
 export PGUSER=container
 export PGPASSWORD=container
 
-# -------------------------------------------------------
-# PASO 3: Crear usuario y base de datos de Planka
-# -------------------------------------------------------
-echo "[3/5] Configurando base de datos..."
+# ─────────────────────────────────────────────────────────────────────────────
+# PASO 3b: Crear usuario y base de datos de Planka
+# ─────────────────────────────────────────────────────────────────────────────
 
-if [ -z "${DB_NAME}" ] || [ -z "${DB_USER}" ] || [ -z "${DB_PASSWORD}" ]; then
-    echo "ERROR FATAL: DB_NAME, DB_USER y DB_PASSWORD son obligatorias."
-    exit 1
-fi
-
-USER_EXISTS=$(psql -h 127.0.0.1 -p 5432 -tAc \
+USER_EXISTS=$(psql -h 127.0.0.1 -p 5432 -U postgres -tAc \
     "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" 2>/dev/null | tr -d '[:space:]')
 
 if [ "$USER_EXISTS" != "1" ]; then
-    psql -h 127.0.0.1 -p 5432 \
+    psql -h 127.0.0.1 -p 5432 -U postgres \
         -c "CREATE USER \"${DB_USER}\" WITH PASSWORD '${DB_PASSWORD}';" >/dev/null 2>&1
-    echo "  Usuario '${DB_USER}' creado."
+    ok "Usuario '${DB_USER}' creado"
 fi
 
-# Siempre actualizar la contraseña (por si cambió en el panel)
-psql -h 127.0.0.1 -p 5432 \
+# Actualizar contraseña siempre (por si cambió en el panel)
+psql -h 127.0.0.1 -p 5432 -U postgres \
     -c "ALTER USER \"${DB_USER}\" WITH PASSWORD '${DB_PASSWORD}';" >/dev/null 2>&1
 
-DB_EXISTS=$(psql -h 127.0.0.1 -p 5432 -tAc \
+DB_EXISTS=$(psql -h 127.0.0.1 -p 5432 -U postgres -tAc \
     "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" 2>/dev/null | tr -d '[:space:]')
 
 if [ "$DB_EXISTS" != "1" ]; then
-    createdb -h 127.0.0.1 -p 5432 -O "${DB_USER}" "${DB_NAME}" >/dev/null 2>&1
-    psql -h 127.0.0.1 -p 5432 \
+    createdb -h 127.0.0.1 -p 5432 -U postgres -O "${DB_USER}" "${DB_NAME}" >/dev/null 2>&1
+    psql -h 127.0.0.1 -p 5432 -U postgres \
         -c "GRANT ALL PRIVILEGES ON DATABASE \"${DB_NAME}\" TO \"${DB_USER}\";" >/dev/null 2>&1
-    echo "  Base de datos '${DB_NAME}' creada."
+    ok "Base de datos '${DB_NAME}' creada"
 else
-    echo "  Base de datos '${DB_NAME}' ya existe."
+    ok "Base de datos '${DB_NAME}' ya existe"
 fi
 
-echo "  BD OK."
-
-# -------------------------------------------------------
-# PASO 4: SECRET_KEY persistente + escribir .env
-# -------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# PASO 4: SECRET_KEY persistente + generar .env
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "[4/5] Aplicando configuración..."
 
 SECRET_FILE="/home/container/.secret_key"
 if [ ! -f "$SECRET_FILE" ] || [ ! -s "$SECRET_FILE" ]; then
     openssl rand -hex 64 > "$SECRET_FILE"
-    echo "  SECRET_KEY generada."
+    ok "SECRET_KEY generada"
 fi
 SECRET_KEY=$(cat "$SECRET_FILE")
-
-if [ -z "$SECRET_KEY" ]; then
-    echo "ERROR FATAL: No se pudo leer/generar SECRET_KEY."
-    exit 1
-fi
-
-if [ -z "${SERVER_PORT}" ]; then
-    echo "ERROR FATAL: SERVER_PORT no definido."
-    exit 1
-fi
-
-if [ -z "${BASE_URL}" ]; then
-    BASE_URL="http://localhost:${SERVER_PORT}"
-    echo "  ADVERTENCIA: BASE_URL vacío. Usando $BASE_URL"
-fi
+[ -n "$SECRET_KEY" ] || die "No se pudo leer/generar SECRET_KEY"
 
 cat > /home/container/.env << ENVEOF
-## === Planka - Generado por start.sh ===
+## === Planka — Generado por start.sh ===
 ## Se regenera en cada inicio. No editar manualmente.
 
 BASE_URL=${BASE_URL}
@@ -289,14 +230,15 @@ DEFAULT_ADMIN_PASSWORD=${ADMIN_PASSWORD}
 DEFAULT_ADMIN_NAME=${ADMIN_NAME}
 ENVEOF
 
-[ -n "${SMTP_URI}"  ] && echo "SMTP_URI=${SMTP_URI}"   >> /home/container/.env
-[ -n "${SMTP_FROM}" ] && echo "SMTP_FROM=${SMTP_FROM}" >> /home/container/.env
+[ -n "${SMTP_URI:-}"  ] && echo "SMTP_URI=${SMTP_URI}"   >> /home/container/.env
+[ -n "${SMTP_FROM:-}" ] && echo "SMTP_FROM=${SMTP_FROM}" >> /home/container/.env
 
-echo "  .env aplicado."
+ok ".env generado"
 
-# -------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # PASO 5: Migrar BD y arrancar Planka
-# -------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "[5/5] Migrando base de datos e iniciando Planka..."
 echo ""
 echo "  Puerto : ${SERVER_PORT}"
@@ -305,15 +247,14 @@ echo "  Admin  : ${ADMIN_EMAIL}"
 echo ""
 echo "=========================================="
 
-if ! npm run db:init; then
-    echo "ERROR FATAL: Migración de la base de datos falló."
-    exit 1
-fi
+npm run db:init || die "Migración de la base de datos falló"
 
+# Limpieza al recibir señal de parada
 cleanup() {
+    echo ""
     echo "Señal recibida — deteniendo PostgreSQL..."
     pg_ctl -D "$PGDATA" stop -m fast 2>/dev/null || true
-    rm -f "$NSS_WRAPPER_PASSWD" "$NSS_WRAPPER_GROUP" 2>/dev/null || true
+    rm -f "${NSS_WRAPPER_PASSWD:-}" "${NSS_WRAPPER_GROUP:-}" 2>/dev/null || true
     exit 0
 }
 trap cleanup SIGTERM SIGINT
