@@ -1,0 +1,152 @@
+{
+    "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PTERODACTYL PANEL - PTERODACTYL.IO",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-04-26T15:38:56-03:00",
+    "name": "Planka",
+    "author": "chato102011@gmail.com",
+    "description": "Planka.app \u2014 Tablero Kanban open-source. Yolk propio con Node.js 22 + PostgreSQL 16 nativos (sin copia de binarios). El start.sh se descarga desde GitHub (Vicemi\/planka-egg).",
+    "features": null,
+    "docker_images": {
+        "Planka Yolk Vicemi": "ghcr.io\/vicemi\/planka-egg:latest"
+    },
+    "file_denylist": [],
+    "startup": "bash start.sh",
+    "config": {
+        "files": "{}",
+        "startup": "{\r\n    \"done\": \"Server lifted successfully\"\r\n}",
+        "logs": "{}",
+        "stop": "^^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!\/bin\/bash\r\n# ============================================================\r\n# Instalador Planka v2 para Pterodactyl\r\n# Imagen instaladora: ghcr.io\/vicemi\/planka-egg:latest\r\n# (Node.js 22 + PostgreSQL 16 nativos \u2014 sin copias de binarios)\r\n# ============================================================\r\n\r\nset -euo pipefail\r\n\r\nDISCORD_URL=\"${DISCORD_WEBHOOK_URL:-}\"\r\nSERVER_DIR=\"\/mnt\/server\"\r\n\r\ndisc() {\r\n    echo \">>> $1\"\r\n    if [ -n \"$DISCORD_URL\" ]; then\r\n        local MSG\r\n        MSG=$(printf '%s' \"$1\" | head -c 1900)\r\n        curl -s -m 8 -X POST \"$DISCORD_URL\" \\\r\n            -H \"Content-Type: application\/json\" \\\r\n            -d \"{\\\"content\\\": \\\"\\`\\`\\`\\n${MSG}\\n\\`\\`\\`\\\"}\" >\/dev\/null 2>&1 || true\r\n    fi\r\n}\r\n\r\ndisc \"=== INICIO INSTALACION PLANKA v2 ===\"\r\ndisc \"OS: $(. \/etc\/os-release && echo $PRETTY_NAME)\"\r\ndisc \"Node: $(node --version 2>\/dev\/null || echo 'no detectado')\"\r\ndisc \"PG  : $(pg_ctl --version 2>\/dev\/null || echo 'no detectado')\"\r\n\r\n# --- PASO 1: Descargar Planka prebuild ---\r\ndisc \"[1\/3] Descargando Planka prebuild desde GitHub...\"\r\nmkdir -p \/tmp\/planka_install\r\n\r\ncurl -L -f --connect-timeout 30 --max-time 300 \\\r\n    -o \/tmp\/planka_install\/planka-prebuild.zip \\\r\n    \"https:\/\/github.com\/plankanban\/planka\/releases\/latest\/download\/planka-prebuild.zip\" \\\r\n    || { disc \"FALLO: No se pudo descargar Planka\"; exit 1; }\r\n\r\nZIP_SIZE=$(wc -c < \/tmp\/planka_install\/planka-prebuild.zip)\r\ndisc \"[1\/3] ZIP: ${ZIP_SIZE} bytes \u2014 extrayendo...\"\r\n\r\nunzip -q \/tmp\/planka_install\/planka-prebuild.zip -d \/tmp\/planka_install\/ \\\r\n    || { disc \"FALLO: unzip fall\u00f3\"; exit 1; }\r\n\r\n[ -d \/tmp\/planka_install\/planka ] || {\r\n    disc \"FALLO: directorio planka\/ no encontrado en el ZIP\"\r\n    disc \"$(find \/tmp\/planka_install -maxdepth 2 | head -20 | tr '\\n' ' ')\"\r\n    exit 1\r\n}\r\n\r\ncp -a \/tmp\/planka_install\/planka\/. \"$SERVER_DIR\/\"\r\nrm -rf \/tmp\/planka_install\r\nrm -f \"$SERVER_DIR\/start.sh\"\r\n\r\n[ -f \"$SERVER_DIR\/package.json\" ] || { disc \"FALLO: package.json no existe\"; exit 1; }\r\n\r\nmkdir -p \"$SERVER_DIR\"\/{logs,tmp}\r\nmkdir -p \"$SERVER_DIR\/public\"\/{user-avatars,project-background-images,background-images}\r\nmkdir -p \"$SERVER_DIR\/private\/attachments\"\r\n\r\ndisc \"[1\/3] Planka OK \u2014 $(ls $SERVER_DIR\/ | wc -l) archivos\"\r\n\r\n# --- PASO 2: Instalar dependencias de Node.js ---\r\ndisc \"[2\/3] Instalando dependencias de Node.js...\"\r\ncd \"$SERVER_DIR\"\r\nnpm install --omit=dev || { disc \"FALLO: npm install fall\u00f3\"; exit 1; }\r\ndisc \"[2\/3] Dependencias instaladas correctamente\"\r\n\r\n# --- PASO 3: Descargar start.sh desde GitHub ---\r\ndisc \"[3\/3] Descargando start.sh desde Vicemi\/planka-egg...\"\r\n\r\ncurl -L -f --connect-timeout 20 --max-time 60 \\\r\n    -o \"$SERVER_DIR\/start.sh\" \\\r\n    \"https:\/\/raw.githubusercontent.com\/Vicemi\/planka-egg\/main\/start.sh\" \\\r\n    || { disc \"FALLO: No se pudo descargar start.sh\"; exit 1; }\r\n\r\n[ -s \"$SERVER_DIR\/start.sh\" ] || { disc \"FALLO: start.sh vac\u00edo\"; exit 1; }\r\n\r\nsed -i 's\/\\r$\/\/' \"$SERVER_DIR\/start.sh\"\r\nchmod +x \"$SERVER_DIR\/start.sh\"\r\ndisc \"[3\/3] start.sh OK \u2014 $(wc -c < $SERVER_DIR\/start.sh) bytes\"\r\n\r\ndisc \"=== INSTALACION COMPLETADA ===\"\r\ndisc \"Ra\u00edz server: $(ls $SERVER_DIR\/ | tr '\\n' ' ')\"\r\necho \"Instalaci\u00f3n completada exitosamente.\"",
+            "container": "ghcr.io\/vicemi\/planka-egg:latest",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "URL Base",
+            "description": "URL completa donde se acceder\u00e1 a Planka, incluyendo el puerto. Ejemplo: http:\/\/1.2.3.4:27015",
+            "env_variable": "BASE_URL",
+            "default_value": "http:\/\/localhost:1337",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string",
+            "field_type": "text"
+        },
+        {
+            "name": "Confiar en Proxy Inverso",
+            "description": "Usar 'true' si Planka est\u00e1 detr\u00e1s de un proxy inverso (nginx, Cloudflare, etc). Usar 'false' para acceso directo por IP:puerto.",
+            "env_variable": "TRUST_PROXY",
+            "default_value": "false",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:true,false",
+            "field_type": "text"
+        },
+        {
+            "name": "SMTP URI (opcional)",
+            "description": "URI para env\u00edo de correos. Dejar vac\u00edo para deshabilitar. Ejemplo: smtps:\/\/user:pass@smtp.gmail.com:465",
+            "env_variable": "SMTP_URI",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        },
+        {
+            "name": "SMTP From (opcional)",
+            "description": "Direcci\u00f3n remitente. Ejemplo: Planka <no-reply@tudominio.com>",
+            "env_variable": "SMTP_FROM",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        },
+        {
+            "name": "DB Nombre",
+            "description": "Nombre de la base de datos PostgreSQL interna.",
+            "env_variable": "DB_NAME",
+            "default_value": "planka",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string",
+            "field_type": "text"
+        },
+        {
+            "name": "DB Usuario",
+            "description": "Nombre de usuario de PostgreSQL interno.",
+            "env_variable": "DB_USER",
+            "default_value": "planka_user",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string",
+            "field_type": "text"
+        },
+        {
+            "name": "DB Contrase\u00f1a",
+            "description": "Contrase\u00f1a del usuario PostgreSQL. C\u00e1mbiala por algo seguro.",
+            "env_variable": "DB_PASSWORD",
+            "default_value": "CambiarEsto123Seguro!",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|min:8",
+            "field_type": "text"
+        },
+        {
+            "name": "Admin Email",
+            "description": "Correo del administrador inicial. Solo crea la cuenta si no existe todav\u00eda.",
+            "env_variable": "ADMIN_EMAIL",
+            "default_value": "admin@example.com",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string",
+            "field_type": "text"
+        },
+        {
+            "name": "Admin Nombre de Usuario",
+            "description": "Nombre de usuario del administrador para iniciar sesi\u00f3n.",
+            "env_variable": "ADMIN_USERNAME",
+            "default_value": "admin",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|min:3",
+            "field_type": "text"
+        },
+        {
+            "name": "Admin Contrase\u00f1a",
+            "description": "Contrase\u00f1a del administrador inicial. Solo aplica al crear la cuenta la primera vez.",
+            "env_variable": "ADMIN_PASSWORD",
+            "default_value": "CambiarEsto123!",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|min:8",
+            "field_type": "text"
+        },
+        {
+            "name": "Admin Nombre Completo",
+            "description": "Nombre para mostrar del administrador dentro de Planka.",
+            "env_variable": "ADMIN_NAME",
+            "default_value": "Administrador",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|min:2",
+            "field_type": "text"
+        },
+        {
+            "name": "Discord Webhook URL (logs de instalaci\u00f3n)",
+            "description": "URL del webhook de Discord para recibir logs del instalador. Opcional.",
+            "env_variable": "DISCORD_WEBHOOK_URL",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        }
+    ]
+}
