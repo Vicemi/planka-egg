@@ -31,13 +31,13 @@ echo "[0/5] Verificando variables de entorno..."
 : "${DB_NAME:?}"     || die "DB_NAME no definida"
 : "${DB_USER:?}"     || die "DB_USER no definida"
 : "${DB_PASSWORD:?}" || die "DB_PASSWORD no definida"
-: "${SERVER_PORT:?}" || die "SERVER_PORT no definida"
+: "${PLANKA_PORT:?}" || die "PLANKA_PORT no definida"
 : "${ADMIN_EMAIL:?}" || die "ADMIN_EMAIL no definida"
 : "${ADMIN_USERNAME:?}" || die "ADMIN_USERNAME no definida"
 : "${ADMIN_PASSWORD:?}" || die "ADMIN_PASSWORD no definida"
 : "${ADMIN_NAME:?}"  || die "ADMIN_NAME no definida"
 
-BASE_URL="${BASE_URL:-http://localhost:${SERVER_PORT}}"
+BASE_URL="${BASE_URL:-http://localhost:${PLANKA_PORT}}"
 ok "Variables OK"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -221,7 +221,7 @@ cat > /home/container/.env << ENVEOF
 BASE_URL=${BASE_URL}
 DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:5432/${DB_NAME}
 SECRET_KEY=${SECRET_KEY}
-PORT=${SERVER_PORT}
+PORT=${PLANKA_PORT}
 TRUST_PROXY=${TRUST_PROXY:-false}
 
 DEFAULT_ADMIN_EMAIL=${ADMIN_EMAIL}
@@ -241,7 +241,7 @@ ok ".env generado"
 echo ""
 echo "[5/5] Migrando base de datos e iniciando Planka..."
 echo ""
-echo "  Puerto : ${SERVER_PORT}"
+echo "  Puerto : ${PLANKA_PORT}"
 echo "  URL    : ${BASE_URL}"
 echo "  Admin  : ${ADMIN_EMAIL}"
 echo ""
